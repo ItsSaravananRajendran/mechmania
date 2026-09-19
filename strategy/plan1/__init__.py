@@ -405,12 +405,25 @@ def _apply_assignments(action: FleetAction, state: GameState, conf,
                 bot_action.special_action = SpecialAction.Battle(fire=clear_shot and hittable)
                 bot_action.turn_action = turn_towards(target.pos)
 
+                # The engine resolves a tick's moves *before* its blasters
+                # fire, so a bot that keeps walking toward `move_target`
+                # this tick shoots from wherever that step lands it, not
+                # from the position `_has_clear_shot` just verified. In the
+                # open that's usually harmless (one tick's step barely
+                # changes the sightline), but right at a wall's convex
+                # corner a single step is enough to swing the ray from
+                # clear to clipping the wall's edge -- exactly the
+                # "line of sight looked clear but the shot hit the wall"
+                # case. Hold position for the tick spent actually firing so
+                # the shot leaves from the spot that was checked.
+                if clear_shot and hittable:
+                    move_target = bot.pos
                 # In range but no clear shot: something is in the way, so
                 # break formation just enough to get one. A wall calls for
                 # routing around it (`navigate_to` already does that towards
                 # any point); a deposit or the payload isn't part of that
                 # wall topology, so step around it explicitly instead.
-                if in_range and not clear_shot:
+                elif in_range and not clear_shot:
                     if not line_of_sight(bot.pos, target.pos):
                         move_target = target.pos
                     else:
