@@ -10,6 +10,7 @@ spacing) never has to touch the others:
 - `combat_los`: clear-shot checks against walls, deposits, and the payload.
 - `targeting`: fleet-wide, cooldown-aware target assignment.
 - `formation`: zone/positioning so bots don't cluster.
+- `mining_defense`: miner escorts and enemy-miner raiders.
 - `fabricator`: build-order.
 - `endgame`: the endgame self-destruct call.
 
@@ -49,6 +50,13 @@ from .formation import (
     _formation_scale,
     _min_safe_spacing,
     _resolve_slot,
+)
+from .mining_defense import (
+    _compute_guard_positions,
+    _nearest_threat_to_deposit,
+    _pick_miner_escorts,
+    _pick_raiders,
+    _raid_target_pos,
 )
 from .targeting import _assign_battle_targets
 from .walls import _get_wall_grid
@@ -266,8 +274,39 @@ def _recompute_assignments(state: GameState, conf) -> FleetAction:
             }
 
     remaining_battles = [b for b in battles if b.id != payload_battle_id]
-    formation_slots = _compute_battle_formation(remaining_battles, payload, forward, conf, wall_grid)
-    for battle in remaining_battles:
+
+    # A fixed-size escort stays glued to the mining line -- protecting the
+    # miners is a standing job, not "whatever's left over after the payload"
+    # -- and roughly a third of whoever's left after that goes raiding the
+    # enemy's own miners. Both selections are stable by id, so a bot built
+    # to replace one that died drops into the same role rather than the
+    # whole roster reshuffling (see `mining_defense.py`).
+    escorts = _pick_miner_escorts(remaining_battles)
+    escort_ids = {b.id for b in escorts}
+    guard_positions = _compute_guard_positions(escorts, state, forward, conf, wall_grid)
+    for escort in escorts:
+        threat = _nearest_threat_to_deposit(state, conf)
+        assignments[escort.id] = {
+            "kind": "battle",
+            "role": "guard_miners",
+            "target_id": threat.id if threat else battle_targets.get(escort.id),
+            "move_target": guard_positions.get(escort.id, state.deposit_me.pos),
+        }
+
+    after_escort = [b for b in remaining_battles if b.id not in escort_ids]
+    raiders = _pick_raiders(after_escort)
+    raider_ids = {b.id for b in raiders}
+    for raider in raiders:
+        assignments[raider.id] = {
+            "kind": "battle",
+            "role": "raid",
+            "target_id": battle_targets.get(raider.id),
+            "move_target": _raid_target_pos(state, raider),
+        }
+
+    formation_group = [b for b in after_escort if b.id not in raider_ids]
+    formation_slots = _compute_battle_formation(formation_group, payload, forward, conf, wall_grid)
+    for battle in formation_group:
         assignments[battle.id] = {
             "kind": "battle",
             "role": "combat",

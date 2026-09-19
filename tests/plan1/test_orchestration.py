@@ -133,6 +133,91 @@ class RecomputeAssignmentsTests(unittest.TestCase):
         min_safe = plan1_pkg._min_safe_spacing(conf)
         self.assertGreaterEqual(move_target.dist(patient.pos), min_safe)
 
+    def test_battle_fleet_splits_into_payload_escort_raid_and_formation(self):
+        # 7 battle bots, none in the payload's capture radius -> 1 dedicated
+        # payload defender (the fallback pick), 3 miner escorts, 1 raider
+        # (round(3 * 1/3) of the remaining 3), 2 left for the formation
+        # line.
+        battles = [FakeBot(i, Vec2(5.0, 5.0), class_=BotClass.Battle) for i in range(7)]
+        state = FakeState(fleet_me=battles, payload=Vec2(16.0, 16.0))
+        conf = FakeConf()
+        with _EnginePatch():
+            plan1_pkg._recompute_assignments(state, conf)
+        assignments = plan1_pkg._cache["assignments"]
+        roles = {bid: a["role"] for bid, a in assignments.items()}
+        counts = {}
+        for role in roles.values():
+            counts[role] = counts.get(role, 0) + 1
+        self.assertEqual(counts.get("payload"), 1)
+        self.assertEqual(counts.get("guard_miners"), 3)
+        self.assertEqual(counts.get("raid"), 1)
+        self.assertEqual(counts.get("combat"), 2)
+
+    def test_miner_escort_targets_a_threat_near_the_deposit_over_the_global_pick(self):
+        battles = [FakeBot(i, Vec2(5.0, 5.0), class_=BotClass.Battle) for i in range(4)]
+        # A lone enemy sitting right on top of our deposit -- exactly the
+        # "enemy came to hit the miners" case an escort must engage.
+        enemy_at_deposit = FakeBot(50, Vec2(2.0, 2.0), class_=BotClass.Battle)
+        state = FakeState(fleet_me=battles, fleet_other=[enemy_at_deposit], payload=Vec2(16.0, 16.0))
+        state.deposit_me.pos = Vec2(2.0, 2.0)
+        conf = FakeConf()
+        with _EnginePatch():
+            plan1_pkg._recompute_assignments(state, conf)
+        assignments = plan1_pkg._cache["assignments"]
+        escort_ids = [bid for bid, a in assignments.items() if a.get("role") == "guard_miners"]
+        self.assertEqual(len(escort_ids), 3)
+        for bid in escort_ids:
+            self.assertEqual(assignments[bid]["target_id"], 50)
+
+    def test_raider_heads_towards_the_enemy_deposit_area(self):
+        battles = [FakeBot(i, Vec2(5.0, 5.0), class_=BotClass.Battle) for i in range(7)]
+        state = FakeState(fleet_me=battles, payload=Vec2(16.0, 16.0))
+        state.deposit_me.pos = Vec2(0.0, 0.0)
+        state.deposit_other.pos = Vec2(30.0, 30.0)
+        conf = FakeConf()
+        with _EnginePatch():
+            plan1_pkg._recompute_assignments(state, conf)
+        assignments = plan1_pkg._cache["assignments"]
+        raider_ids = [bid for bid, a in assignments.items() if a.get("role") == "raid"]
+        self.assertEqual(len(raider_ids), 1)
+        move_target = assignments[raider_ids[0]]["move_target"]
+        self.assertEqual((move_target.x, move_target.y), (30.0, 30.0))
+
+    def test_escort_and_raider_roles_survive_a_replacement_bot(self):
+        # 7 battle bots -> escorts {0,1,2}, raider {3}, formation {4,5}
+        # (bot 6 is the payload defender, at the payload). Kill escort 1 --
+        # composition is picked fresh by id each recompute (see
+        # `_pick_miner_escorts`), so bot 3 (next-lowest id after the gap)
+        # shifts up to take the vacated escort slot, and whichever bot is
+        # newly built backfills further down the chain (raid or formation)
+        # rather than needing to specifically "know" it should guard.
+        # Either way, the escort/raid *counts* must stay exactly the same
+        # size after every recompute, dead bot or not.
+        battles = [FakeBot(i, Vec2(5.0, 5.0), class_=BotClass.Battle) for i in range(7)]
+        battles[6].pos = Vec2(16.5, 16.0)  # near the payload -> becomes the defender
+        state = FakeState(fleet_me=battles, payload=Vec2(16.0, 16.0))
+        conf = FakeConf()
+        with _EnginePatch():
+            plan1_pkg._recompute_assignments(state, conf)
+        assignments = plan1_pkg._cache["assignments"]
+        self.assertEqual(assignments[0]["role"], "guard_miners")
+        self.assertEqual(assignments[1]["role"], "guard_miners")
+        self.assertEqual(assignments[3]["role"], "raid")
+
+        replacement = [b for b in battles if b.id != 1] + [FakeBot(20, Vec2(0.0, 0.0), class_=BotClass.Battle)]
+        state2 = FakeState(fleet_me=replacement, payload=Vec2(16.0, 16.0))
+        with _EnginePatch():
+            plan1_pkg._recompute_assignments(state2, conf)
+        assignments2 = plan1_pkg._cache["assignments"]
+        roles2 = {bid: a["role"] for bid, a in assignments2.items()}
+        self.assertEqual(sum(1 for r in roles2.values() if r == "guard_miners"), 3)
+        self.assertEqual(sum(1 for r in roles2.values() if r == "raid"), 1)
+        # Bot 3 (previously the raider) shifts up into the escort slot 1
+        # left vacant; the newly-built bot (highest id) lands further down
+        # the chain, still fully assigned rather than dropped.
+        self.assertEqual(roles2.get(3), "guard_miners")
+        self.assertIn(roles2.get(20), {"raid", "combat"})
+
     def test_every_bot_gets_an_assignment(self):
         fleet = [
             FakeBot(0, Vec2(2, 2), class_=BotClass.Extractor),

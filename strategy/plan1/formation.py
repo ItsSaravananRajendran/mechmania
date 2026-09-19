@@ -21,6 +21,13 @@ from .walls import WallGrid, _is_slot_free
 # than splash radius" spacing keeps.
 SPLASH_SAFETY_MARGIN = 1.2
 
+# The number of extractors actually put to work mining at once -- kept small
+# and fixed rather than "as many as the fleet has" so the mining line stays a
+# size a handful of escorts (see `mining_defense.py`) can plausibly cover,
+# and so `_compute_mining_spots`'s face-of-the-deposit layout never has to
+# grow unbounded.
+MAX_ACTIVE_MINERS = 3
+
 
 def _forward_direction(state: GameState) -> Vec2:
     """Unit vector from our deposit towards the enemy's -- a map-relative
@@ -291,7 +298,7 @@ def _compute_mining_spots(
     base = deposit_pos - forward * (conf.deposit.radius + conf.bot.radius * 1.5)
     spacing = max(4.0 * conf.bot.radius, conf.bot.base_blaster_splash_radius * 6.0)
 
-    n = min(len(extractors), 3)
+    n = min(len(extractors), MAX_ACTIVE_MINERS)
     result: Dict[int, Vec2] = {}
     for i, ext in enumerate(extractors[:n]):
         slot = _lateral_slot(base, perp, i, n, spacing)

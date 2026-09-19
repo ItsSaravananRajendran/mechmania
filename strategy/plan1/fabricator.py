@@ -5,11 +5,20 @@ from __future__ import annotations
 from typing import Dict, FrozenSet
 
 from .. import BotClass, GameState
+from .formation import MAX_ACTIVE_MINERS
 
 
 def _compute_fabricator_next(state: GameState, conf, cache: Dict,
                               friendly_born: FrozenSet[int] = frozenset()) -> int:
     if not state.fleet_me.get(0):
+        return int(BotClass.Extractor)
+
+    # Keep a usable mining crew topped up at all times, not just during the
+    # opening ramp -- a miner lost to a raid at tick 3000 needs replacing
+    # just as much as one that was never built, or mining (and the fleet's
+    # whole economy) quietly stalls out for the rest of the match.
+    extractor_alive = sum(1 for b in state.fleet_me if b.class_ == BotClass.Extractor)
+    if extractor_alive < MAX_ACTIVE_MINERS:
         return int(BotClass.Extractor)
 
     if len(state.fleet_me) >= 10:
@@ -22,10 +31,6 @@ def _compute_fabricator_next(state: GameState, conf, cache: Dict,
         if our_slots < their_slots:
             return int(BotClass.Extractor)
         return int(BotClass.Battle)
-
-    extractor_alive = sum(1 for b in state.fleet_me if b.class_ == BotClass.Extractor)
-    if state.tick <= 30 and extractor_alive < 3:
-        return int(BotClass.Extractor)
 
     # Net fleet-size growth misses a birth that lands the same tick as a
     # death (size holds steady) and over-counts a later replacement for one
