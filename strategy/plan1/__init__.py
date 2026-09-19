@@ -47,6 +47,7 @@ from .formation import (
     _dedupe_slots,
     _forward_direction,
     _formation_scale,
+    _min_safe_spacing,
     _resolve_slot,
 )
 from .targeting import _assign_battle_targets
@@ -217,11 +218,18 @@ def _recompute_assignments(state: GameState, conf) -> FleetAction:
                       if b.id != h.id and b.health < conf.bot.health * 0.9]
         if candidates:
             target = min(candidates, key=lambda b: b.health)
-            # Stand near the patient, not literally on it -- heal range
-            # (`base_heal_range`) is well past melee distance, and a healer
-            # stacked on the ally it's healing hands the enemy a single
-            # splash hit that can down both of them at once.
-            standoff = min(2.0, conf.bot.base_heal_range * 0.5)
+            # Stand directly behind the patient along the friendly-to-enemy
+            # axis (not literally on it, and not off to the side) -- that
+            # puts the patient's own hull between the healer and incoming
+            # fire on that line (same shielding the battle line uses, see
+            # `_stack_behind`), and heal range (`base_heal_range`) is well
+            # past melee distance so there's room to do it. The standoff
+            # must clear `_min_safe_spacing` -- splash radius plus margin --
+            # or a hit on the patient can down the healer behind it too;
+            # capped at half heal range (and heal range itself) so it can
+            # still land heals.
+            standoff = max(_min_safe_spacing(conf), min(2.0, conf.bot.base_heal_range * 0.5))
+            standoff = min(standoff, conf.bot.base_heal_range)
             assignments[h.id] = {
                 "kind": "healer",
                 "role": "combat",
@@ -247,7 +255,7 @@ def _recompute_assignments(state: GameState, conf) -> FleetAction:
                                  rear_anchors.get(h.id, rear_center))
             for h in idle_healers
         }
-        rear_resolved = _dedupe_slots(rear_resolved, perp, spacing)
+        rear_resolved = _dedupe_slots(rear_resolved, perp, spacing, min_distance=_min_safe_spacing(conf))
         for h in idle_healers:
             slot = rear_resolved[h.id]
             assignments[h.id] = {

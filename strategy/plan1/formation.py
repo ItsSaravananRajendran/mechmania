@@ -12,6 +12,14 @@ from .. import BotState, GameState, Vec2
 from .cache import _cache
 from .walls import WallGrid, _is_slot_free
 
+# A splash hit only reaches `base_blaster_splash_radius` from where it lands,
+# so any two bots farther apart than that can't both be caught by the same
+# shot -- but exactly that far apart leaves zero room for float slop or a
+# bot's actual position drifting slightly off its target slot between
+# recomputes. This is the margin above the literal radius that "just greater
+# than splash radius" spacing keeps.
+SPLASH_SAFETY_MARGIN = 1.2
+
 
 def _forward_direction(state: GameState) -> Vec2:
     """Unit vector from our deposit towards the enemy's -- a map-relative
@@ -27,6 +35,15 @@ def _forward_direction(state: GameState) -> Vec2:
         forward = Vec2(0.0, 1.0)
     _cache["forward_dir"] = forward
     return forward
+
+
+def _min_safe_spacing(conf) -> float:
+    """The minimum distance any two bots' target slots may end up apart:
+    just over one splash radius (`SPLASH_SAFETY_MARGIN`), floored by twice
+    the bot radius so bots are never asked to stand inside one another.
+    This is the hard "one hit can't reach two bots" invariant; `_formation_scale`'s
+    `spacing`/`row_gap` are the larger, tactical distances layered on top of it."""
+    return max(2.0 * conf.bot.radius, conf.bot.base_blaster_splash_radius * SPLASH_SAFETY_MARGIN)
 
 
 def _lateral_slot(center: Vec2, perp: Vec2, index: int, count: int, spacing: float) -> Vec2:
@@ -69,7 +86,7 @@ def _formation_scale(conf) -> Tuple[float, float, float, float]:
     """
     spacing = max(4.0 * conf.bot.radius, conf.bot.base_blaster_splash_radius * 6.0,
                   conf.bot.blaster_range * 0.2)
-    min_spacing = max(2.0 * conf.bot.radius, conf.bot.base_blaster_splash_radius * 2.2)
+    min_spacing = _min_safe_spacing(conf)
     max_width = max(6.0 * conf.bot.radius, conf.bot.blaster_range * 1.5)
     row_gap = max(2.0 * conf.bot.radius, conf.bot.blaster_range * 0.15)
     return spacing, min_spacing, max_width, row_gap
@@ -121,43 +138,92 @@ def _arrange_group(
     return slots, anchors
 
 
-def _dedupe_slots(slots: Dict[int, Vec2], perp: Vec2, spacing: float) -> Dict[int, Vec2]:
+def _dedupe_slots(
+    slots: Dict[int, Vec2], perp: Vec2, spacing: float, min_distance: float = 0.0,
+) -> Dict[int, Vec2]:
     """Last-resort safety net: whatever upstream cause it had (two zones'
     wall-nudged anchors happening to coincide, an anchor and its own bots'
     interpolated fallbacks converging, ...), no two bots should ever end up
     reported at the literal same tile -- that's a free multi-kill for
     whoever's shooting at either of them. Walk bots in a stable order and
-    nudge any exact repeat along `perp` until it's distinct."""
+    nudge any exact repeat along `perp` until it's distinct.
+
+    `min_distance`, when given, is a stronger check than exact-duplicate: it
+    also nudges a slot that's merely *closer than that* to an already-placed
+    one -- the "just greater than splash radius" invariant -- since two bots
+    a few centimetres apart (not on the identical tile) are just as much a
+    free multi-kill as two bots stacked exactly on top of each other."""
     seen: Set[Tuple[float, float]] = set()
+    placed: List[Vec2] = []
     result: Dict[int, Vec2] = {}
     for bot_id in sorted(slots.keys()):
         pos = slots[bot_id]
         bump = 1
         key = (round(pos.x, 2), round(pos.y, 2))
-        while key in seen:
+        too_close = min_distance > 0.0 and any(pos.dist(p) < min_distance for p in placed)
+        while (key in seen or too_close) and bump < 200:
             pos = slots[bot_id] + perp * (spacing * 0.3 * bump)
             key = (round(pos.x, 2), round(pos.y, 2))
+            too_close = min_distance > 0.0 and any(pos.dist(p) < min_distance for p in placed)
             bump += 1
         seen.add(key)
+        placed.append(pos)
         result[bot_id] = pos
     return result
+
+
+def _stack_behind(
+    wall_grid: WallGrid, front_positions: List[Vec2], forward: Vec2,
+    trailing: List[BotState], depth_gap: float,
+) -> Tuple[Dict[int, Vec2], Dict[int, Vec2]]:
+    """Stack `trailing` bots directly behind `front_positions` (same lateral
+    offset, stepped back along `-forward` by multiples of `depth_gap`)
+    instead of giving them their own lateral line -- each trailing bot sits
+    in the column "shadow" of the bot ahead of it. A shot that hits the
+    front bot can't also reach the one behind it once `depth_gap` clears
+    splash radius (see `_min_safe_spacing`), and the front bot's hull sits
+    on the straight-line ray to it too, since the engine's blaster ray stops
+    at the first enemy bot it hits (`wiki/mechanics.md`) -- the front bot
+    screens the one(s) behind it both from splash and from direct fire on
+    that line. Trailing bots cycle through columns round-robin (`i % len`)
+    so extra bots stack deeper rather than piling behind a single column."""
+    if not front_positions:
+        return {}, {}
+    n_cols = len(front_positions)
+    raw_slots: Dict[int, Vec2] = {}
+    anchors: Dict[int, Vec2] = {}
+    for i, bot in enumerate(trailing):
+        col = i % n_cols
+        depth = (i // n_cols) + 1
+        anchor = front_positions[col]
+        anchors[bot.id] = anchor
+        raw_slots[bot.id] = anchor - forward * (depth_gap * depth)
+    resolved = {
+        bot_id: _resolve_slot(wall_grid, slot, anchors[bot_id])
+        for bot_id, slot in raw_slots.items()
+    }
+    return resolved, anchors
 
 
 def _compute_battle_formation(
     battles: List[BotState], payload: Vec2, forward: Vec2, conf, wall_grid: WallGrid
 ) -> Dict[int, Vec2]:
-    """Line-abreast zones instead of a tight ring: a screen layer a little
-    ahead of the payload (first to take a hit), a stand-off layer behind it
-    (free to fire without closing into splash range), spaced further apart
-    than the blaster's splash radius so no single impact can multi-kill. Small
-    fleets collapse to one spread line -- there aren't enough bots to make two
-    zones meaningful."""
+    """A screen layer a little ahead of the payload (first to take a hit),
+    line-abreast so splash can't multi-kill along that line, with the rest
+    of the fleet stacked directly *behind* a screen bot in the same column
+    (see `_stack_behind`) rather than in their own separate lateral line --
+    each screen bot both shields and gets shielded by the bot(s) queued
+    behind it, one hit can only reach one bot in a column, and healers
+    assigned to heal a screen bot (see `_recompute_assignments`) land in
+    that same column too. Small fleets collapse to one spread line -- there
+    aren't enough bots to make a screen-plus-column split meaningful."""
     n = len(battles)
     if n == 0:
         return {}
 
     perp = forward.rotate_deg(90.0)
     spacing, min_spacing, max_width, row_gap = _formation_scale(conf)
+    min_safe = _min_safe_spacing(conf)
 
     # Never anchor a zone directly on `payload` itself -- the dedicated
     # payload-defender bot already sits there (see `_recompute_assignments`),
@@ -174,14 +240,16 @@ def _compute_battle_formation(
     else:
         n_screen = max(1, n // 2)
         screen_center = payload + forward * max(2.0 * conf.bot.radius, conf.bot.blaster_range * 0.25)
-        standoff_center = payload - forward * max(4.0 * conf.bot.radius, conf.bot.blaster_range * 0.6)
 
         screen = battles[:n_screen]
-        standoff = battles[n_screen:]
+        rest = battles[n_screen:]
         s, a = _arrange_group(wall_grid, screen_center, forward, perp, screen, spacing, min_spacing, max_width, row_gap)
         raw_slots.update(s)
         anchors.update(a)
-        s, a = _arrange_group(wall_grid, standoff_center, -forward, perp, standoff, spacing, min_spacing, max_width, row_gap)
+
+        front_positions = [s[b.id] for b in screen]
+        depth_gap = max(row_gap, min_safe)
+        s, a = _stack_behind(wall_grid, front_positions, forward, rest, depth_gap)
         raw_slots.update(s)
         anchors.update(a)
 
@@ -189,7 +257,7 @@ def _compute_battle_formation(
         bot_id: _resolve_slot(wall_grid, slot, anchors[bot_id])
         for bot_id, slot in raw_slots.items()
     }
-    return _dedupe_slots(resolved, perp, spacing)
+    return _dedupe_slots(resolved, perp, spacing, min_distance=min_safe)
 
 
 def _compute_mining_spots(
