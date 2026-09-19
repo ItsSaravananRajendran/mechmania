@@ -3,6 +3,3 @@
 **/__pycache__/
 !/mm-config.toml
 !/.gitignore
-wiki/*
-agent.md
-plans/

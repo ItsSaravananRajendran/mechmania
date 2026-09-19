@@ -1,5 +1,7 @@
 from . import *
 
+from strategy.plan1 import plan1_strategy
+
 
 def get_strategy(team: int) -> Strategy:
     """This function tells the engine what strategy you want your bot to use."""
@@ -7,16 +9,12 @@ def get_strategy(team: int) -> Strategy:
     # team == 0 means I am bottom left
     # team == 1 means I am top right
 
-    if team == 0:
-        print("Hello! I am team A (on the bottom left)")
-        return basic_strategy
-    else:
-        print("Hello! I am team B (on the top right)")
-        return do_nothing
-
-    # NOTE when actually submitting your bot, you probably want to have the SAME strategy
-    # for both sides: the engine mirrors the world for the top-right team, so there is
-    # nothing for a side to specialise in.
+    # The engine mirrors the world for the top-right team, so there is
+    # nothing for a side to specialise in. Both teams use the same strategy.
+    #
+    # Five strategies live in strategy/plan1.py .. plan5.py (plan{N}_strategy).
+    # Swap the import above and the return below to try a different one.
+    return plan1_strategy
 
 def do_nothing(state: GameState) -> FleetAction:
     """The smallest strategy there is: issue no orders at all."""
