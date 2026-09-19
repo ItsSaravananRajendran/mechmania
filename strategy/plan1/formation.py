@@ -7,7 +7,7 @@ slot from collapsing multiple bots onto the same point.
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from .. import BotState, GameState, Vec2
 from .cache import _cache
@@ -213,8 +213,20 @@ def _stack_behind(
     return resolved, anchors
 
 
+def _is_retreating(bot: BotState, tick: Optional[int]) -> bool:
+    """Whether `bot` just took a hit and should fall back instead of holding
+    the front line -- `invulnerable_until_tick` is exactly the engine's own
+    "this bot was just hit" signal (`wiki/mechanics.md`), so there's no need
+    for a separate health-threshold heuristic: still in that window means an
+    attack landed on it this cycle. `tick=None` (callers that don't pass the
+    current tick) disables retreat entirely, so every existing caller/test
+    that predates this keeps its original screen/column assignment."""
+    return tick is not None and bot.invulnerable_until_tick > tick
+
+
 def _compute_battle_formation(
-    battles: List[BotState], payload: Vec2, forward: Vec2, conf, wall_grid: WallGrid
+    battles: List[BotState], payload: Vec2, forward: Vec2, conf, wall_grid: WallGrid,
+    tick: Optional[int] = None,
 ) -> Dict[int, Vec2]:
     """A screen layer a little ahead of the payload (first to take a hit),
     line-abreast so splash can't multi-kill along that line, with the rest
@@ -227,7 +239,16 @@ def _compute_battle_formation(
     resulting grid comes out roughly square -- as many columns as rows --
     rather than one wide row with a deep tail behind it. Small fleets
     collapse to one spread line -- there aren't enough bots to make a
-    screen-plus-column split meaningful."""
+    screen-plus-column split meaningful.
+
+    `tick`, when given, adds a retreat/backoff pass: any bot still in its
+    post-hit invulnerability window (`_is_retreating`) is sorted behind every
+    bot that isn't, before the screen/rest split happens -- so a bot an
+    attack just landed on drops out of the front row into a column instead
+    (safely behind the healthy screen bot ahead of it, and in the "shadow"
+    where a support healer -- which targets the lowest-health ally -- ends
+    up standing too), while whichever bot was queued directly behind it in
+    the id ordering takes the now-vacant screen slot."""
     n = len(battles)
     if n == 0:
         return {}
@@ -249,6 +270,14 @@ def _compute_battle_formation(
         raw_slots.update(s)
         anchors.update(a)
     else:
+        # Bots an attack just landed on drop to the back of the ordering --
+        # each partition keeps its own relative (id) order, so this is the
+        # only thing that can bump a healthy bot ahead of one that's
+        # currently retreating.
+        healthy = [b for b in battles if not _is_retreating(b, tick)]
+        retreating = [b for b in battles if _is_retreating(b, tick)]
+        ordered = healthy + retreating
+
         # ceil(sqrt(n)) columns means ceil(n / that) rows too -- a square
         # grid (or as close to one as an integer bot count allows), instead
         # of the lopsided "half the fleet in one wide screen row, the other
@@ -257,8 +286,8 @@ def _compute_battle_formation(
         n_screen = max(1, math.ceil(math.sqrt(n)))
         screen_center = payload + forward * max(2.0 * conf.bot.radius, conf.bot.blaster_range * 0.25)
 
-        screen = battles[:n_screen]
-        rest = battles[n_screen:]
+        screen = ordered[:n_screen]
+        rest = ordered[n_screen:]
         s, a = _arrange_group(wall_grid, screen_center, forward, perp, screen, spacing, min_spacing, max_width, row_gap)
         raw_slots.update(s)
         anchors.update(a)

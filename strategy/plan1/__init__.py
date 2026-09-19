@@ -11,6 +11,8 @@ spacing) never has to touch the others:
 - `targeting`: fleet-wide, cooldown-aware target assignment.
 - `formation`: zone/positioning so bots don't cluster.
 - `mining_defense`: miner escorts and enemy-miner raiders.
+- `healer_roles`: splits the healer roster across the goal, escort, and raid groups.
+- `heal_coverage`: positions a squad's healer to keep as much of it in heal range as possible.
 - `fabricator`: build-order.
 - `endgame`: the endgame self-destruct call.
 
@@ -21,7 +23,7 @@ ties them together.
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Set
+from typing import Dict, List, Optional, Set
 
 from .. import (
     BotClass,
@@ -48,9 +50,12 @@ from .formation import (
     _dedupe_slots,
     _forward_direction,
     _formation_scale,
+    _is_retreating,
     _min_safe_spacing,
     _resolve_slot,
 )
+from .heal_coverage import _heal_position
+from .healer_roles import _pick_healer_groups
 from .mining_defense import (
     _compute_guard_positions,
     _nearest_threat_to_deposit,
@@ -133,6 +138,58 @@ def plan1_strategy(state: GameState) -> FleetAction:
     return action
 
 
+def _assign_support_healers(
+    assignments: Dict[int, dict], healers: List[BotState], allies: List[BotState],
+    forward: Vec2, conf, wall_grid, rear_center: Vec2, role: str,
+) -> None:
+    """Shared logic for every non-dedicated healer group (the goal line's
+    extra healers, the miner escort's, the raider's): stand wherever keeps
+    the most of `allies` within heal range (`heal_coverage._heal_position`)
+    -- at most `MAX_ATTACKERS_OUT_OF_HEAL_RANGE` left out, when that's at
+    all achievable with one healer -- and heal whichever one is actually
+    hurt from there, rather than beelining for just that one patient and
+    leaving the rest of the squad uncovered until they're the lowest-health
+    bot in it. With nobody in `allies` at all (an empty squad, e.g. no
+    raiders picked this tick), spread any such healers into a rear zone
+    behind `rear_center` instead of leaving them to stack on one point."""
+    if not healers:
+        return
+
+    if allies:
+        coverage_pos = _heal_position(allies, forward, conf)
+        positioned: Dict[int, Vec2] = {}
+        for h in healers:
+            candidates = [b for b in allies if b.id != h.id and b.health < conf.bot.health * 0.9]
+            target_id = min(candidates, key=lambda b: b.health).id if candidates else None
+            assignments[h.id] = {"kind": "healer", "role": role, "target_id": target_id}
+            positioned[h.id] = coverage_pos
+        perp = forward.rotate_deg(90.0)
+        spacing, _, _, _ = _formation_scale(conf)
+        positioned = _dedupe_slots(positioned, perp, spacing, min_distance=_min_safe_spacing(conf))
+        for h in healers:
+            assignments[h.id]["move_target"] = positioned[h.id]
+        return
+
+    perp = forward.rotate_deg(90.0)
+    spacing, min_spacing, max_width, row_gap = _formation_scale(conf)
+    rear_slots, rear_anchors = _arrange_group(
+        wall_grid, rear_center, -forward, perp, healers, spacing, min_spacing, max_width, row_gap
+    )
+    rear_resolved = {
+        h.id: _resolve_slot(wall_grid, rear_slots.get(h.id, rear_anchors.get(h.id, rear_center)),
+                             rear_anchors.get(h.id, rear_center))
+        for h in healers
+    }
+    rear_resolved = _dedupe_slots(rear_resolved, perp, spacing, min_distance=_min_safe_spacing(conf))
+    for h in healers:
+        assignments[h.id] = {
+            "kind": "healer",
+            "role": role,
+            "target_id": None,
+            "move_target": rear_resolved[h.id],
+        }
+
+
 def _recompute_assignments(state: GameState, conf) -> FleetAction:
     action = FleetAction.new()
     payload = state.payload_pos()
@@ -182,96 +239,20 @@ def _recompute_assignments(state: GameState, conf) -> FleetAction:
     # once. Split them a little to either side of it instead.
     payload_defense_offset = min(1.0, capture_radius * 0.4)
 
-    payload_healer_id: Optional[int] = None
-    if healers:
-        in_cap = [h for h in healers if h.pos.dist(payload) <= capture_radius]
-        if in_cap:
-            payload_healer_id = in_cap[0].id
-        else:
-            payload_healer_id = min(healers, key=lambda h: h.pos.dist(payload)).id
-
-        candidates = [b for b in state.fleet_me
-                      if b.id != payload_healer_id
-                      and b.pos.dist(payload) <= capture_radius]
-        target_id = min(candidates, key=lambda b: b.health).id if candidates else None
-
-        assignments[payload_healer_id] = {
-            "kind": "healer",
-            "role": "payload",
-            "target_id": target_id,
-            "move_target": payload - forward * payload_defense_offset,
-        }
-
+    # ---- battle roles: payload defender, miner escort, raid, formation ----
+    # Picked before the healer roles below, since the miner-escort/raid
+    # support healers need to know who's actually in each of those groups.
     payload_battle_id: Optional[int] = None
     if battles:
         in_cap = [b for b in battles if b.pos.dist(payload) <= capture_radius]
-        battle_candidates = [b for b in (in_cap if in_cap else battles)
-                           if b.id != (payload_healer_id if payload_healer_id else -1)]
-        if battle_candidates:
-            payload_battle_id = battle_candidates[0].id
-        else:
-            payload_battle_id = min(battles, key=lambda b: b.pos.dist(payload)).id
-
+        battle_candidates = in_cap if in_cap else battles
+        payload_battle_id = battle_candidates[0].id
         assignments[payload_battle_id] = {
             "kind": "battle",
             "role": "payload",
             "target_id": battle_targets.get(payload_battle_id),
             "move_target": payload + forward * payload_defense_offset,
         }
-
-    remaining_healers = [h for h in healers if h.id != payload_healer_id]
-    idle_healers = []
-    for h in remaining_healers:
-        candidates = [b for b in state.fleet_me
-                      if b.id != h.id and b.health < conf.bot.health * 0.9]
-        if candidates:
-            target = min(candidates, key=lambda b: b.health)
-            # Stand directly behind the patient along the friendly-to-enemy
-            # axis (not literally on it, and not off to the side) -- that
-            # puts the patient's own hull between the healer and incoming
-            # fire on that line (same shielding the battle line uses, see
-            # `_stack_behind`), and heal range (`base_heal_range`) is well
-            # past melee distance so there's room to do it. The standoff
-            # must clear `_min_safe_spacing` -- splash radius plus margin --
-            # or a hit on the patient can down the healer behind it too;
-            # capped at half heal range (and heal range itself) so it can
-            # still land heals.
-            standoff = max(_min_safe_spacing(conf), min(2.0, conf.bot.base_heal_range * 0.5))
-            standoff = min(standoff, conf.bot.base_heal_range)
-            assignments[h.id] = {
-                "kind": "healer",
-                "role": "combat",
-                "target_id": target.id,
-                "move_target": target.pos - forward * standoff,
-            }
-        else:
-            idle_healers.append(h)
-
-    if idle_healers:
-        # Nothing to heal right now -- previously these all defaulted to the
-        # literal payload point and stacked there, which is exactly the kind
-        # of splash-bait clustering formation is meant to avoid. Give them a
-        # rear zone instead, behind the battle stand-off line.
-        perp = forward.rotate_deg(90.0)
-        spacing, min_spacing, max_width, row_gap = _formation_scale(conf)
-        rear_center = payload - forward * max(6.0 * conf.bot.radius, conf.bot.blaster_range * 0.8)
-        rear_slots, rear_anchors = _arrange_group(
-            wall_grid, rear_center, -forward, perp, idle_healers, spacing, min_spacing, max_width, row_gap
-        )
-        rear_resolved = {
-            h.id: _resolve_slot(wall_grid, rear_slots.get(h.id, rear_anchors.get(h.id, rear_center)),
-                                 rear_anchors.get(h.id, rear_center))
-            for h in idle_healers
-        }
-        rear_resolved = _dedupe_slots(rear_resolved, perp, spacing, min_distance=_min_safe_spacing(conf))
-        for h in idle_healers:
-            slot = rear_resolved[h.id]
-            assignments[h.id] = {
-                "kind": "healer",
-                "role": "combat",
-                "target_id": None,
-                "move_target": slot,
-            }
 
     remaining_battles = [b for b in battles if b.id != payload_battle_id]
 
@@ -305,7 +286,7 @@ def _recompute_assignments(state: GameState, conf) -> FleetAction:
         }
 
     formation_group = [b for b in after_escort if b.id not in raider_ids]
-    formation_slots = _compute_battle_formation(formation_group, payload, forward, conf, wall_grid)
+    formation_slots = _compute_battle_formation(formation_group, payload, forward, conf, wall_grid, tick=state.tick)
     for battle in formation_group:
         assignments[battle.id] = {
             "kind": "battle",
@@ -313,6 +294,49 @@ def _recompute_assignments(state: GameState, conf) -> FleetAction:
             "target_id": battle_targets.get(battle.id),
             "move_target": formation_slots.get(battle.id, payload),
         }
+
+    # ---- healer roles: goal/payload line, miner escort, raid group ----
+    # A fixed split (see `healer_roles.py`), same rationale as the battle
+    # split above: protecting the miners and pressuring the enemy's are
+    # standing jobs with their own dedicated support, not something every
+    # healer independently drifts towards based on who's nearest and hurt.
+    goal_healers, miner_healers, raid_healers = _pick_healer_groups(healers)
+
+    payload_healer_id: Optional[int] = None
+    if goal_healers:
+        in_cap = [h for h in goal_healers if h.pos.dist(payload) <= capture_radius]
+        payload_healer_id = (in_cap[0] if in_cap else
+                              min(goal_healers, key=lambda h: h.pos.dist(payload))).id
+        candidates = [b for b in state.fleet_me
+                      if b.id != payload_healer_id
+                      and b.pos.dist(payload) <= capture_radius]
+        target_id = min(candidates, key=lambda b: b.health).id if candidates else None
+        assignments[payload_healer_id] = {
+            "kind": "healer",
+            "role": "payload",
+            "target_id": target_id,
+            "move_target": payload - forward * payload_defense_offset,
+        }
+
+    # The other 1-2 goal healers (and the escort/raid healers below) heal
+    # whoever in their own squad needs it, standing a rear zone behind that
+    # squad's own anchor when nobody does -- never the bare payload point,
+    # which is exactly the splash-bait clustering formation avoids elsewhere.
+    other_goal_healers = [h for h in goal_healers if h.id != payload_healer_id]
+    goal_allies = formation_group + ([state.fleet_me.get(payload_battle_id)]
+                                      if payload_battle_id is not None else [])
+    goal_rear = payload - forward * max(6.0 * conf.bot.radius, conf.bot.blaster_range * 0.8)
+    _assign_support_healers(assignments, other_goal_healers, goal_allies, forward, conf,
+                             wall_grid, goal_rear, role="combat")
+
+    miner_allies = escorts + extractors
+    miner_rear = state.deposit_me.pos + forward * max(2.0 * conf.bot.radius, conf.bot.blaster_range * 0.15)
+    _assign_support_healers(assignments, miner_healers, miner_allies, forward, conf,
+                             wall_grid, miner_rear, role="miner_support")
+
+    raid_rear = _raid_target_pos(state, raiders[0]) if raiders else state.deposit_other.pos
+    _assign_support_healers(assignments, raid_healers, raiders, forward, conf,
+                             wall_grid, raid_rear, role="raid_support")
 
     for bot in state.fleet_me:
         if bot.id in assignments:
@@ -440,6 +464,20 @@ def _apply_assignments(action: FleetAction, state: GameState, conf,
                 claimed_targets.add(target.id)
 
             move_target = assignment.get("move_target", payload)
+
+            # An enemy already within blaster range has closed the distance
+            # that matters -- pressing on toward a forward formation/raid
+            # slot only walks past a fight that's already started. Hold the
+            # current spot and let the target logic below aim/fire (or, if
+            # something's blocking the shot, flank) from here instead of
+            # advancing further. A bot still in its post-hit invulnerability
+            # window is exempt -- it's the one bot that's supposed to keep
+            # moving right now, falling back into formation to get healed
+            # (`formation._is_retreating`), not holding a forward line.
+            if not _is_retreating(bot, state.tick) and any(
+                e.pos.dist(bot.pos) <= conf.bot.blaster_range for e in state.fleet_other
+            ):
+                move_target = bot.pos
 
             if target is not None:
                 in_range = bot.pos.dist(target.pos) <= conf.bot.blaster_range

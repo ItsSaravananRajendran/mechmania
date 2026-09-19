@@ -62,9 +62,13 @@ so it's still the right place to go looking).
 ## How this plugs into `orchestration.md`
 
 `_recompute_assignments` calls these in order, after the dedicated payload
-defenders are picked and before `_compute_battle_formation` sees what's
+defender is picked and before `_compute_battle_formation` sees what's
 left: escorts get `role: "guard_miners"`, raiders get `role: "raid"`, and
 everyone else still goes through the normal formation/combat path
 (`role: "combat"`). All three roles execute through the same generic battle
 branch in `_apply_assignments` -- the role string is bookkeeping only, not
 a fork in the movement/firing logic.
+
+`healer_roles.py`'s `_pick_healer_groups` mirrors this same escort/raid
+split for the healer roster (`orchestration.md`), so the escort and raid
+groups this module picks each get their own dedicated healer.

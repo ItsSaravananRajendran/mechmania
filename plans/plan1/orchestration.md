@@ -60,24 +60,55 @@ deliberately in two places noted below):
    this, every surviving bot just keeps mining and nothing ever holds the
    payload — which loses the match outright the instant the enemy commits a
    single bot to push it (capture only needs *a* bot in range, any class).
-3. **Payload defenders** — one Healer and one Battle bot (if any exist) are
-   pinned near the payload (`role: "payload"`), offset a little to either
-   side of the exact point (`payload ± forward * payload_defense_offset`,
-   capped at 1 unit or 40% of capture radius) rather than both sitting on
-   the identical coordinate, which would let one splash hit take out both
-   the objective's healer and its defender at once.
-4. **Remaining healers** — each either gets a heal target (the lowest-health
-   ally under 90% HP, stood near but not on top of, so the healer and its
-   patient aren't stacked for a shared splash kill) or, if nobody needs
-   healing, joins a rear formation zone behind the stand-off line
-   (`formation._arrange_group` + `_resolve_slot` + `_dedupe_slots`) instead
-   of defaulting to the literal payload point, which is exactly the kind of
-   clustering formation exists to prevent.
-5. **Remaining battles** — get a target from `targeting._assign_battle_targets`
-   (computed once, up front, for the whole `battles` list) and a slot from
-   `formation._compute_battle_formation`.
+3. **Payload defender (Battle)** — one Battle bot (if any exist) is pinned
+   near the payload (`role: "payload"`, `payload + forward * payload_defense_offset`).
+4. **Remaining battles** (`mining_defense.py`) — split, in priority order:
+   - **Miner escort** (`_pick_miner_escorts`) — a fixed `MINER_ESCORT_COUNT`
+     (3) battle bots, lined up on the enemy-facing side of our deposit
+     (`_compute_guard_positions`), `role: "guard_miners"`. Targets the
+     nearest enemy within `blaster_range` of the deposit
+     (`_nearest_threat_to_deposit`) over whatever the fleet-wide target pass
+     handed it, so it never has to leave its post to chase something.
+   - **Raid group** (`_pick_raiders`) — roughly a third of whoever's left,
+     `role: "raid"`, headed for the nearest visible enemy `Extractor` or the
+     enemy deposit (`_raid_target_pos`).
+   - **Formation** — everyone still left gets a target from
+     `targeting._assign_battle_targets` (computed once, up front, for the
+     whole `battles` list) and a slot from `formation._compute_battle_formation`
+     (passed `tick=state.tick`, so a bot an attack just landed on backs off
+     out of the screen row for the rest of its invulnerability window and
+     the next bot in line takes the front, per `formation.md`),
+     `role: "combat"`.
+5. **Healer roles** (`healer_roles.py`) — the healer roster is split the
+   same way, by id, via `_pick_healer_groups`: `GOAL_HEALER_COUNT` (3) go to
+   the goal/payload line, `MINER_HEALER_COUNT` (1) rides with the miner
+   escort, `RAID_HEALER_COUNT` (1) rides with the raid group. Goal fills
+   first — protecting the win condition outranks either economy job — so a
+   roster smaller than 5 leaves the miner/raid healer slots empty rather
+   than the goal line short-handed. Within the goal group, the first healer
+   (nearest the payload, or already inside capture radius) is the dedicated
+   payload defender (`role: "payload"`, pinned at
+   `payload - forward * payload_defense_offset`, offset from the Battle
+   defender above so one splash can't take out both); the rest of each
+   group (goal's other 1-2, the miner healer, the raid healer) stands
+   wherever covers the most of its own squad within heal range
+   (`heal_coverage._heal_position`, `orchestration.md`'s squad, not the
+   whole fleet) — at most `MAX_ATTACKERS_OUT_OF_HEAL_RANGE` (2) left
+   outside it, when that's achievable with one healer — and heals whichever
+   bot in the squad is hurt (lowest-health ally under 90% HP) from there.
+   A squad with no allies at all (e.g. no raiders picked this tick) falls
+   back to a rear zone behind that squad's own anchor instead
+   (`formation._arrange_group` + `_resolve_slot` + `_dedupe_slots`) rather
+   than defaulting to the literal payload point, which is exactly the kind
+   of clustering formation exists to prevent.
 6. **Catch-all** — any bot not yet assigned (shouldn't normally happen; a
    safety net) defaults to heading for the payload.
+
+Every one of these role splits (`_pick_miner_escorts`, `_pick_raiders`,
+`_pick_healer_groups`) is recomputed fresh, by id, on every call — not a
+cached identity — so a bot built to replace one that died naturally
+backfills whichever slot the id ordering says is short, without any
+bookkeeping of "who used to hold this role."
 
 ## `_apply_assignments(action, state, conf, assignments, enemy_in_capture)` — turning a plan into orders
 
@@ -97,6 +128,19 @@ that died since the plan was made, say). Per bot, by `kind`:
     every other bot's live cached target) rather than "nearest enemy"
     independently per bot, which would silently reintroduce the dogpiling
     `targeting.py` exists to prevent.
+  - **Hold instead of advance**: before anything target-specific, if *any*
+    enemy is already within `blaster_range` of this bot and it isn't
+    `formation._is_retreating`, its move target collapses to its own
+    current position — pressing on toward a forward formation/guard/raid
+    slot only walks past a fight that's already started, whether or not
+    that nearby enemy happens to be this bot's own assigned target. A
+    retreating bot is exempt: it's the one bot that's *supposed* to keep
+    moving right now, falling back to get healed
+    (`formation._is_retreating`), not holding a forward line. The
+    target-specific logic below (aim, fire, or flank around an obstacle)
+    still runs and can move the bot from there if it needs to maneuver for
+    a shot — this only suppresses the *default* pull toward the assigned
+    slot.
   - Fire only if in range, `_has_clear_shot`, *and* the target isn't
     currently invulnerable — firing at an invulnerable target burns the
     blaster's own cooldown for a shot that can't land.
