@@ -1,6 +1,7 @@
 from . import *
 
 from strategy.plan1 import plan1_strategy
+from strategy.plan2 import plan2_strategy
 
 
 def get_strategy(team: int) -> Strategy:
@@ -12,13 +13,19 @@ def get_strategy(team: int) -> Strategy:
     # The engine mirrors the world for the top-right team, so there is
     # nothing for a side to specialise in. Both teams use the same strategy.
     #
-    # Five strategies live in strategy/plan1.py .. plan5.py (plan{N}_strategy).
+    # Five strategies live in strategy/plan1/ (a package) and plan2.py .. plan5.py
+    # (plan{N}_strategy).
     # Swap the import above and the return below to try a different one.
-    return plan1_strategy
+    if team == 0:
+        return plan1_strategy
+    else:
+        return plan2_strategy
+
 
 def do_nothing(state: GameState) -> FleetAction:
     """The smallest strategy there is: issue no orders at all."""
     return FleetAction.new()
+
 
 def basic_strategy(state: GameState) -> FleetAction:
     """Assign one bot to extract from our deposit, one bot to hold the payload, and send
@@ -55,7 +62,8 @@ def basic_strategy(state: GameState) -> FleetAction:
     # You do not actually have to hug the ring -- an extractor mines anything within
     # `conf.bot.base_extract_range` that it has a sightline to (`line_of_sight`), and only
     # walls block that ray, not bots. Standing back is safer.
-    mining_spot = state.deposit_me.pos + Vec2(0.0, conf.deposit.radius + conf.bot.radius)
+    mining_spot = state.deposit_me.pos + \
+        Vec2(0.0, conf.deposit.radius + conf.bot.radius)
 
     assigned_contester = False
 
@@ -67,7 +75,8 @@ def basic_strategy(state: GameState) -> FleetAction:
         bot_action = action.bots[bot.id]
 
         if bot.class_ == BotClass.Extractor:
-            bot_action.move_action = move_bot(navigate_to(bot.pos, mining_spot))
+            bot_action.move_action = move_bot(
+                navigate_to(bot.pos, mining_spot))
             bot_action.turn_action = turn_towards(state.deposit_me.pos)
             bot_action.special_action = SpecialAction.Extractor(mine=True)
             continue
