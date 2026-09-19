@@ -1,5 +1,7 @@
 /*
 !/strategy/
+!/plans
+!/tests
 **/__pycache__/
 !/mm-config.toml
 !/.gitignore
