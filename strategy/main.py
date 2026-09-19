@@ -5,21 +5,16 @@ from strategy.plan2 import plan2_strategy
 
 
 def get_strategy(team: int) -> Strategy:
-    """This function tells the engine what strategy you want your bot to use."""
-
-    # team == 0 means I am bottom left
-    # team == 1 means I am top right
-
-    # The engine mirrors the world for the top-right team, so there is
-    # nothing for a side to specialise in. Both teams use the same strategy.
-    #
-    # Five strategies live in strategy/plan1/ (a package) and plan2.py .. plan5.py
-    # (plan{N}_strategy).
-    # Swap the import above and the return below to try a different one.
+    # team == 0 means I am bottom left; team == 1 means I am top right. The
+    # engine mirrors the world for team 1, so there's nothing to specialise
+    # per side -- but both teams must NOT run the identical strategy, or
+    # mirrored-identical play never breaks symmetry and every match ties.
     if team == 0:
         return plan1_strategy
     else:
         return plan2_strategy
+
+
 
 
 def do_nothing(state: GameState) -> FleetAction:

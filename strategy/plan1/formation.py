@@ -30,15 +30,11 @@ def _forward_direction(state: GameState) -> Vec2:
 
 
 def _lateral_slot(center: Vec2, perp: Vec2, index: int, count: int, spacing: float) -> Vec2:
+    # Every caller already offsets `center` off the literal anchor point
+    # (payload/deposit) along `forward` before calling this, so a zero
+    # lateral offset for the middle bot of an odd-sized row never lands on
+    # anything -- keep the row evenly spaced and centred on `center`.
     offset_units = index - (count - 1) / 2.0
-    # A bare `index - (count - 1) / 2` gives the *middle* bot of an odd-sized
-    # row a zero offset, which lands it precisely on top of whatever else is
-    # anchored at `center` (the dedicated payload defender sits at literal
-    # `payload`). Nudge only that one slot -- adding the offset to every
-    # index instead (as an earlier version of this did) shifts the whole row
-    # off-centre rather than fixing the single colliding slot.
-    if count % 2 == 1 and index == count // 2:
-        offset_units += 0.5
     return center + perp * (offset_units * spacing)
 
 

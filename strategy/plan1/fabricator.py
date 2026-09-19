@@ -30,9 +30,17 @@ def _compute_fabricator_next(state: GameState, conf, cache: Dict,
     # Net fleet-size growth misses a birth that lands the same tick as a
     # death (size holds steady) and over-counts a later replacement for one
     # that already left (size looks like it "grew" again) -- count actual
-    # births instead of inferring them from the size delta.
-    if friendly_born:
-        cache["alt_count"] = cache.get("alt_count", 0) + 1
+    # births instead of inferring them from the size delta. Only combat
+    # (Battle/Healer) births should toggle the alternation: a rush or a
+    # natural build landing the same tick as another counts as two, and an
+    # Extractor rebuild (e.g. slot 0 dying and respawning) isn't part of the
+    # Battle/Healer alternation at all and must not flip it.
+    combat_born = sum(
+        1 for bid in friendly_born
+        if state.fleet_me.get(bid) and state.fleet_me.get(bid).class_ != BotClass.Extractor
+    )
+    if combat_born:
+        cache["alt_count"] = cache.get("alt_count", 0) + combat_born
 
     alt_count = cache.get("alt_count", 0)
     return int(BotClass.Battle if alt_count % 2 == 0 else BotClass.Healer)

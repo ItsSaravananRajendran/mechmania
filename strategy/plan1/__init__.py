@@ -33,12 +33,11 @@ from .. import (
     get_budget,
     get_config,
     line_of_sight,
-    move_bot,
-    navigate_to,
     turn_towards,
 )
 from .cache import _cache
 from .combat_los import _blocking_obstacle, _flank_point, _has_clear_shot
+from .corners import _steer
 from .endgame import _maybe_endgame_self_destruct
 from .fabricator import _compute_fabricator_next
 from .formation import (
@@ -164,6 +163,7 @@ def _recompute_assignments(state: GameState, conf) -> FleetAction:
         assignments[holder.id] = {
             "kind": "extractor",
             "mining_spot": payload,
+            "at_payload": True,
         }
 
     # The dedicated payload defenders (one healer, one battle bot) both need
@@ -310,6 +310,7 @@ def _apply_assignments(action: FleetAction, state: GameState, conf,
                        assignments: Dict, enemy_in_capture: bool) -> None:
     payload = state.payload_pos()
     enemies_by_id = {e.id: e for e in state.fleet_other}
+    wall_grid = _get_wall_grid(conf)
 
     # Bots whose cached target has since died (or that never got an
     # assignment at all, e.g. built between recomputes) need a fallback --
@@ -332,12 +333,21 @@ def _apply_assignments(action: FleetAction, state: GameState, conf,
 
         if kind == "extractor" or bot.class_ == BotClass.Extractor:
             mining_spot = assignment.get("mining_spot")
+            at_payload = assignment.get("at_payload", False)
             if mining_spot is None:
                 mining_spot = state.deposit_me.pos + Vec2(
                     0.0, conf.deposit.radius + conf.bot.radius
                 )
-            bot_action.move_action = move_bot(navigate_to(bot.pos, mining_spot))
-            bot_action.turn_action = turn_towards(state.deposit_me.pos)
+            bot_action.move_action = _steer(bot.pos, mining_spot, wall_grid, conf)
+            if at_payload:
+                # Reassigned onto the payload as an endgame defender (see the
+                # combat-wipe fallback above) -- there's no deposit to mine
+                # from here, so face the nearest enemy in range instead of
+                # turning its back to face the deposit behind it.
+                nearest = min(state.fleet_other, key=lambda e: e.pos.dist(bot.pos), default=None)
+                bot_action.turn_action = turn_towards(nearest.pos if nearest else payload)
+            else:
+                bot_action.turn_action = turn_towards(state.deposit_me.pos)
             bot_action.special_action = SpecialAction.Extractor(mine=True)
 
         elif kind == "healer" or bot.class_ == BotClass.Healer:
@@ -366,7 +376,7 @@ def _apply_assignments(action: FleetAction, state: GameState, conf,
                 bot_action.special_action = SpecialAction.Healer(fire=False, target=0)
 
             move_target = assignment.get("move_target", payload)
-            bot_action.move_action = move_bot(navigate_to(bot.pos, move_target))
+            bot_action.move_action = _steer(bot.pos, move_target, wall_grid, conf)
 
         elif kind == "battle" or bot.class_ == BotClass.Battle:
             target_id = assignment.get("target_id")
@@ -413,10 +423,10 @@ def _apply_assignments(action: FleetAction, state: GameState, conf,
                 bot_action.special_action = SpecialAction.Battle(fire=False)
                 bot_action.turn_action = turn_towards(payload)
 
-            bot_action.move_action = move_bot(navigate_to(bot.pos, move_target))
+            bot_action.move_action = _steer(bot.pos, move_target, wall_grid, conf)
 
         else:
-            bot_action.move_action = move_bot(navigate_to(bot.pos, payload))
+            bot_action.move_action = _steer(bot.pos, payload, wall_grid, conf)
             if bot.class_ == BotClass.Extractor:
                 bot_action.special_action = SpecialAction.Extractor(mine=True)
             elif bot.class_ == BotClass.Healer:
