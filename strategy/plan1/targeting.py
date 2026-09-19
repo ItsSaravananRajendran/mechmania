@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Set, Tuple
 
-from .. import BotClass, BotState, GameState, path_length
+from .. import BotClass, BotState, GameState
 from .combat_los import _has_clear_shot
 
 # Higher priority target classes get hit first: healers keep the fleet topped up,
@@ -80,19 +80,17 @@ def _assign_battle_targets(
 
     # Bots with no in-range/LOS candidate at all (or whose only candidates
     # were already claimed by someone else) still need a target to close
-    # distance towards -- nearest-by-path, same as before.
+    # distance towards. Nearest by straight-line distance, not `path_length`
+    # -- this loop is bots-without-a-target x every enemy, which in the
+    # worst case (nobody in range yet, e.g. early game) is the full
+    # bot-pair count, and `path_length` in an all-pairs loop is one of the
+    # two most expensive things a strategy can do per tick. The wall-aware
+    # route there is `navigate_to`'s job once this bot is actually moving,
+    # not this pick's.
     for bot in battles:
         if bot.id in assigned:
             continue
-        best = None
-        best_dist = float("inf")
-        for enemy in state.fleet_other:
-            d = path_length(bot.pos, enemy.pos)
-            if d is None:
-                d = bot.pos.dist(enemy.pos)
-            if d < best_dist:
-                best_dist = d
-                best = enemy
+        best = min(state.fleet_other, key=lambda e: bot.pos.dist_sq(e.pos), default=None)
         assigned[bot.id] = best.id if best else None
 
     return {b.id: assigned.get(b.id) for b in battles}

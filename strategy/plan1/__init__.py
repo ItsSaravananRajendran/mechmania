@@ -33,11 +33,12 @@ from .. import (
     get_budget,
     get_config,
     line_of_sight,
+    move_bot,
+    navigate_to,
     turn_towards,
 )
 from .cache import _cache
 from .combat_los import _blocking_obstacle, _flank_point, _has_clear_shot
-from .corners import _steer
 from .endgame import _maybe_endgame_self_destruct
 from .fabricator import _compute_fabricator_next
 from .formation import (
@@ -111,7 +112,7 @@ def plan1_strategy(state: GameState) -> FleetAction:
     _cache["last_friendly_ids"] = friendly_ids
     _cache["last_friendly_in_capture"] = friendly_in_capture
 
-    action.fabricator_next = _compute_fabricator_next(state, conf, _cache)
+    action.fabricator_next = _compute_fabricator_next(state, conf, _cache, friendly_born)
 
     action.rush_order = (
         not in_endgame
@@ -151,6 +152,18 @@ def _recompute_assignments(state: GameState, conf) -> FleetAction:
         assignments[ext.id] = {
             "kind": "extractor",
             "mining_spot": mining_spots.get(ext.id),
+        }
+
+    if not healers and not battles and extractors:
+        # Every combat bot is dead and only extractors are left -- without
+        # this, every extractor just keeps mining and nothing ever holds
+        # the payload, which loses the match outright the moment the enemy
+        # commits a single bot to push it (capture only needs *a* bot in
+        # range, any class). Pull the nearest one off mining to sit there.
+        holder = min(extractors, key=lambda e: e.pos.dist(payload))
+        assignments[holder.id] = {
+            "kind": "extractor",
+            "mining_spot": payload,
         }
 
     # The dedicated payload defenders (one healer, one battle bot) both need
@@ -297,7 +310,6 @@ def _apply_assignments(action: FleetAction, state: GameState, conf,
                        assignments: Dict, enemy_in_capture: bool) -> None:
     payload = state.payload_pos()
     enemies_by_id = {e.id: e for e in state.fleet_other}
-    wall_grid = _get_wall_grid(conf)
 
     # Bots whose cached target has since died (or that never got an
     # assignment at all, e.g. built between recomputes) need a fallback --
@@ -324,7 +336,7 @@ def _apply_assignments(action: FleetAction, state: GameState, conf,
                 mining_spot = state.deposit_me.pos + Vec2(
                     0.0, conf.deposit.radius + conf.bot.radius
                 )
-            bot_action.move_action = _steer(bot.pos, mining_spot, wall_grid, conf)
+            bot_action.move_action = move_bot(navigate_to(bot.pos, mining_spot))
             bot_action.turn_action = turn_towards(state.deposit_me.pos)
             bot_action.special_action = SpecialAction.Extractor(mine=True)
 
@@ -354,7 +366,7 @@ def _apply_assignments(action: FleetAction, state: GameState, conf,
                 bot_action.special_action = SpecialAction.Healer(fire=False, target=0)
 
             move_target = assignment.get("move_target", payload)
-            bot_action.move_action = _steer(bot.pos, move_target, wall_grid, conf)
+            bot_action.move_action = move_bot(navigate_to(bot.pos, move_target))
 
         elif kind == "battle" or bot.class_ == BotClass.Battle:
             target_id = assignment.get("target_id")
@@ -401,10 +413,10 @@ def _apply_assignments(action: FleetAction, state: GameState, conf,
                 bot_action.special_action = SpecialAction.Battle(fire=False)
                 bot_action.turn_action = turn_towards(payload)
 
-            bot_action.move_action = _steer(bot.pos, move_target, wall_grid, conf)
+            bot_action.move_action = move_bot(navigate_to(bot.pos, move_target))
 
         else:
-            bot_action.move_action = _steer(bot.pos, payload, wall_grid, conf)
+            bot_action.move_action = move_bot(navigate_to(bot.pos, payload))
             if bot.class_ == BotClass.Extractor:
                 bot_action.special_action = SpecialAction.Extractor(mine=True)
             elif bot.class_ == BotClass.Healer:

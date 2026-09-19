@@ -30,11 +30,15 @@ def _forward_direction(state: GameState) -> Vec2:
 
 
 def _lateral_slot(center: Vec2, perp: Vec2, index: int, count: int, spacing: float) -> Vec2:
-    # `+ 0.5` on an odd `count` keeps the middle slot off `center` exactly --
-    # a bare `index - (count - 1) / 2` gives the middle bot a zero offset,
-    # which lands it precisely on top of whatever else is anchored at
-    # `center` (the dedicated payload defender sits at literal `payload`).
-    offset_units = index - (count - 1) / 2.0 + (0.5 if count % 2 == 1 else 0.0)
+    offset_units = index - (count - 1) / 2.0
+    # A bare `index - (count - 1) / 2` gives the *middle* bot of an odd-sized
+    # row a zero offset, which lands it precisely on top of whatever else is
+    # anchored at `center` (the dedicated payload defender sits at literal
+    # `payload`). Nudge only that one slot -- adding the offset to every
+    # index instead (as an earlier version of this did) shifts the whole row
+    # off-centre rather than fixing the single colliding slot.
+    if count % 2 == 1 and index == count // 2:
+        offset_units += 0.5
     return center + perp * (offset_units * spacing)
 
 
@@ -205,7 +209,13 @@ def _compute_mining_spots(
     deposit_pos = state.deposit_me.pos
     forward = _forward_direction(state)
     perp = forward.rotate_deg(90.0)
-    base = deposit_pos + forward * (conf.deposit.radius + conf.bot.radius * 1.5)
+    # `forward` points from our deposit towards the enemy's -- standing on
+    # that side puts extractors in the open, facing exactly the direction
+    # fire is likely to come from. The far side puts the deposit disc's own
+    # bulk between them and the enemy (a blaster ray stops at a deposit),
+    # and mining only needs a clear ray back to the deposit, not a
+    # particular side of it.
+    base = deposit_pos - forward * (conf.deposit.radius + conf.bot.radius * 1.5)
     spacing = max(4.0 * conf.bot.radius, conf.bot.base_blaster_splash_radius * 6.0)
 
     n = min(len(extractors), 3)
