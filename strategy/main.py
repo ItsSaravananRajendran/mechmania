@@ -1,20 +1,39 @@
+from pathlib import Path
 from . import *
 
 from strategy.plan1 import plan1_strategy
 from strategy.plan2 import plan2_strategy
+from strategy.plan3 import plan3_strategy
+from strategy.plan4 import plan4_strategy
+from strategy.plan5 import plan5_strategy
+
+# Local configuration file in the project root.
+# Because `mm-cli submit` only uploads `strategy/`, this file is NEVER uploaded to the server.
+LOCAL_CONFIG_FILE = Path(__file__).resolve().parent.parent / ".local"
 
 
 def get_strategy(team: int) -> Strategy:
-    # team == 0 means I am bottom left; team == 1 means I am top right. The
-    # engine mirrors the world for team 1, so there's nothing to specialise
-    # per side -- but both teams must NOT run the identical strategy, or
-    # mirrored-identical play never breaks symmetry and every match ties.
-    if team == 0:
-        return plan1_strategy
-    else:
-        return plan2_strategy
+    # If the local file exists, we are running locally and can pit two strategies against each other
+    if LOCAL_CONFIG_FILE.is_file():
+        if team == 0:
+            return plan1_strategy
 
+        # Team 1 strategy can be customized by writing to .local (e.g. "plan2", "do_nothing", "plan3")
+        content = LOCAL_CONFIG_FILE.read_text().strip().lower()
+        strategies = {
+            "plan1": plan1_strategy,
+            "plan2": plan2_strategy,
+            "plan3": plan3_strategy,
+            "plan4": plan4_strategy,
+            "plan5": plan5_strategy,
+            "do_nothing": do_nothing,
+            "basic": basic_strategy,
+        }
+        return strategies.get(content, do_nothing)
 
+    # In submission mode (on tournament server, .local is absent):
+    # Both team 0 and team 1 must run the primary strategy!
+    return plan1_strategy
 
 
 def do_nothing(state: GameState) -> FleetAction:
