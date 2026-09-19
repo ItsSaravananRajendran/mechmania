@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "mm-loganalysis": {
+      "type": "stdio",
+      "command": "bash",
+      "args": [".mcp/loganalysis-wrapper.sh"]
+    }
+  }
+}
