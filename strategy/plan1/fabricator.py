@@ -7,6 +7,17 @@ from typing import Dict, FrozenSet
 from .. import BotClass, GameState
 from .formation import MAX_ACTIVE_MINERS
 
+# Minimum number of Healers to keep alive at all times once the opening is over.
+# The spec (`plans/plan1.md` R-P1.B3, healer_roles.GOAL_HEALER_COUNT = 3) calls
+# for 3 dedicated healers on the goal line plus support healers for the miner
+# escort and raid group. Top tournament teams (JaniceKeepTalking, clankerbot,
+# Gang) routinely run 4-9 healers alive throughout the match. Set the floor
+# above the goal-line minimum so the alternation rule below can keep adding
+# healers naturally past the floor instead of pinning us at exactly 3 -- the
+# goal/escort/raid split in `healer_roles.py` only fills all three groups
+# (3+1+1) when there are 5+ healers available.
+MIN_HEALERS_ALIVE = 5
+
 
 def _compute_fabricator_next(state: GameState, conf, cache: Dict,
                               friendly_born: FrozenSet[int] = frozenset()) -> int:
@@ -20,6 +31,16 @@ def _compute_fabricator_next(state: GameState, conf, cache: Dict,
     extractor_alive = sum(1 for b in state.fleet_me if b.class_ == BotClass.Extractor)
     if extractor_alive < MAX_ACTIVE_MINERS:
         return int(BotClass.Extractor)
+
+    # Healer replacement: top up to MIN_HEALERS_ALIVE whenever a healer has
+    # died. This is checked before the alternation rule and the
+    # slot-denial/extractors branch so a healer loss in the middle of the match
+    # is replaced before any other build decision is considered. The alternation
+    # rule below still controls the Battle vs Healer choice on normal ticks;
+    # this branch only fires when a healer is genuinely missing.
+    healer_alive = sum(1 for b in state.fleet_me if b.class_ == BotClass.Healer)
+    if healer_alive < MIN_HEALERS_ALIVE:
+        return int(BotClass.Healer)
 
     if len(state.fleet_me) >= 10:
         # `extractors.me`/`.other` are per-bot-id bitmasks (`1 << id`), not
