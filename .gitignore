@@ -1,7 +1,12 @@
 /*
+*.mmgl
+*.zip
+rl/runs/*
+*.log
 !/strategy/
 !/plans
 !/tests
+!/rl
 **/__pycache__/
 !/mm-config.toml
 !/.gitignore
