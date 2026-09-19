@@ -15,8 +15,6 @@ def get_strategy(team: int) -> Strategy:
         return plan2_strategy
 
 
-
-
 def do_nothing(state: GameState) -> FleetAction:
     """The smallest strategy there is: issue no orders at all."""
     return FleetAction.new()
