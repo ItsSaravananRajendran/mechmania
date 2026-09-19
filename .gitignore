@@ -7,6 +7,9 @@ rl/runs/*
 !/plans
 !/tests
 !/rl
+!/tools
+!/.mcp
+!/.mcp.json
 **/__pycache__/
 !/mm-config.toml
 !/.gitignore

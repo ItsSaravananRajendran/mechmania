@@ -91,7 +91,15 @@ firing line for whoever's queued up behind it, and once `depth_gap` clears
 it either. Each trailing slot still goes through `_resolve_slot` against its
 column's front position as anchor.
 
-## `_compute_battle_formation(battles, payload, forward, conf, wall_grid) -> Dict[bot_id, Vec2]`
+## `_is_retreating(bot, tick) -> bool`
+
+Whether `bot` is still inside its post-hit invulnerability window
+(`bot.invulnerable_until_tick > tick`) -- the engine's own "an attack just
+landed on this bot" signal (`wiki/mechanics.md`), reused rather than a
+separate health-threshold heuristic. `tick=None` always returns `False`, so
+a caller that doesn't pass the current tick sees no retreat behavior at all.
+
+## `_compute_battle_formation(battles, payload, forward, conf, wall_grid, tick=None) -> Dict[bot_id, Vec2]`
 
 - **Screen** — a little ahead of the payload (`forward * max(2·radius,
   0.25·blaster_range)`), line-abreast, first to take a hit.
@@ -101,6 +109,18 @@ column's front position as anchor.
   shields and is shielded by whoever's queued behind it in its column; a
   healer assigned to heal a screen bot (see `orchestration.md`) lands in
   that same column too, for the same reason.
+
+**Retreat/backoff** (`n > 3` only): before the screen/rest split, `battles`
+is partitioned into bots still `_is_retreating` and everyone else, each
+partition kept in its own relative (id) order, then concatenated
+healthy-first. A bot an attack just landed on can therefore never occupy a
+screen slot while a healthy bot is available to take it instead -- it drops
+into a column, behind a healthy screen bot, which is exactly where a support
+healer (which targets the lowest-health ally, `orchestration.md`) ends up
+standing too, i.e. "safely in the middle." Whichever bot was next in line
+takes the now-vacant screen slot, i.e. the next row "takes the lead."
+Skipped entirely when `tick` isn't given (`_is_retreating` always `False`),
+so every pre-existing caller keeps its original screen/column assignment.
 
 Screen width is `n_screen = max(1, ceil(sqrt(n)))`, so the number of columns
 and the number of rows (`ceil(n / n_screen)`) come out equal, or as close to

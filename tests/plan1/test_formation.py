@@ -251,6 +251,24 @@ class ArrangeGroupTests(unittest.TestCase):
         self.assertEqual(len(coords), len(bots))
 
 
+class IsRetreatingTests(unittest.TestCase):
+    def test_still_invulnerable_after_a_hit_is_retreating(self):
+        bot = FakeBot(0, Vec2(0, 0), invulnerable_until_tick=20)
+        self.assertTrue(formation_mod._is_retreating(bot, tick=10))
+
+    def test_invulnerability_expired_is_not_retreating(self):
+        bot = FakeBot(0, Vec2(0, 0), invulnerable_until_tick=5)
+        self.assertFalse(formation_mod._is_retreating(bot, tick=10))
+
+    def test_never_hit_is_not_retreating(self):
+        bot = FakeBot(0, Vec2(0, 0), invulnerable_until_tick=0)
+        self.assertFalse(formation_mod._is_retreating(bot, tick=10))
+
+    def test_no_tick_given_disables_retreat(self):
+        bot = FakeBot(0, Vec2(0, 0), invulnerable_until_tick=999)
+        self.assertFalse(formation_mod._is_retreating(bot, tick=None))
+
+
 class ComputeBattleFormationTests(unittest.TestCase):
     def test_empty_battles(self):
         grid = _empty_grid()
@@ -317,6 +335,79 @@ class ComputeBattleFormationTests(unittest.TestCase):
             for col in columns
         )
         self.assertEqual(max_depth, 3)
+
+    def test_recently_hit_bot_drops_out_of_the_screen_row(self):
+        # 9 battles -> screen (front row) would normally be ids 0,1,2. Mark
+        # 0 as still in its post-hit invulnerability window (tick=10 <
+        # invulnerable_until_tick=100) -- it must back off out of the screen
+        # row, and whoever was next in line (id 3) takes the vacated slot.
+        grid = _empty_grid()
+        conf = FakeConf()
+        forward = Vec2(1.0, 0.0)
+        battles = [FakeBot(i, Vec2(0, 0), invulnerable_until_tick=(100 if i == 0 else 0))
+                   for i in range(9)]
+        with _all_free():
+            result = formation_mod._compute_battle_formation(
+                battles, Vec2(16, 16), forward, conf, grid, tick=10,
+            )
+        screen_depth = round(result[1].dot(forward), 4)  # a screen bot untouched by the swap
+        self.assertEqual(round(result[3].dot(forward), 4), screen_depth,
+                          "bot 3 should be promoted into the vacated screen slot")
+        self.assertLess(round(result[0].dot(forward), 4), screen_depth,
+                         "the recently-hit bot must not be in the screen row")
+
+    def test_retreating_bot_ends_up_deepest_in_its_column(self):
+        grid = _empty_grid()
+        conf = FakeConf()
+        forward = Vec2(1.0, 0.0)
+        battles = [FakeBot(i, Vec2(0, 0), invulnerable_until_tick=(100 if i == 0 else 0))
+                   for i in range(9)]
+        with _all_free():
+            result = formation_mod._compute_battle_formation(
+                battles, Vec2(16, 16), forward, conf, grid, tick=10,
+            )
+        depths = [round(v.dot(forward), 4) for v in result.values()]
+        self.assertEqual(round(result[0].dot(forward), 4), min(depths))
+
+    def test_no_tick_keeps_original_screen_selection(self):
+        # Without a tick, a bot's invulnerability window is irrelevant --
+        # existing callers that don't pass `tick` must see no change at all.
+        grid = _empty_grid()
+        conf = FakeConf()
+        forward = Vec2(1.0, 0.0)
+        battles_no_retreat = [FakeBot(i, Vec2(0, 0)) for i in range(9)]
+        battles_would_retreat = [FakeBot(i, Vec2(0, 0), invulnerable_until_tick=(100 if i == 0 else 0))
+                                  for i in range(9)]
+        with _all_free():
+            baseline = formation_mod._compute_battle_formation(
+                battles_no_retreat, Vec2(16, 16), forward, conf, grid,
+            )
+            result = formation_mod._compute_battle_formation(
+                battles_would_retreat, Vec2(16, 16), forward, conf, grid,
+            )
+        for bid in range(9):
+            self.assertAlmostEqual(result[bid].x, baseline[bid].x)
+            self.assertAlmostEqual(result[bid].y, baseline[bid].y)
+
+    def test_small_group_is_unaffected_by_retreat(self):
+        # n<=3 collapses to a single spread line regardless -- not enough
+        # bots for a screen/column split to retreat out of.
+        grid = _empty_grid()
+        conf = FakeConf()
+        forward = Vec2(1.0, 0.0)
+        battles = [FakeBot(i, Vec2(0, 0), invulnerable_until_tick=(100 if i == 0 else 0))
+                   for i in range(3)]
+        with _all_free():
+            retreating = formation_mod._compute_battle_formation(
+                battles, Vec2(16, 16), forward, conf, grid, tick=10,
+            )
+            baseline_battles = [FakeBot(i, Vec2(0, 0)) for i in range(3)]
+            baseline = formation_mod._compute_battle_formation(
+                baseline_battles, Vec2(16, 16), forward, conf, grid,
+            )
+        for bid in range(3):
+            self.assertAlmostEqual(retreating[bid].x, baseline[bid].x)
+            self.assertAlmostEqual(retreating[bid].y, baseline[bid].y)
 
     def test_rest_of_fleet_stacks_directly_behind_a_screen_bot(self):
         # Battles beyond the screen line should land in the column "shadow"
