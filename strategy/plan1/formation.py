@@ -6,6 +6,7 @@ slot from collapsing multiple bots onto the same point.
 
 from __future__ import annotations
 
+import math
 from typing import Dict, List, Set, Tuple
 
 from .. import BotState, GameState, Vec2
@@ -215,8 +216,11 @@ def _compute_battle_formation(
     each screen bot both shields and gets shielded by the bot(s) queued
     behind it, one hit can only reach one bot in a column, and healers
     assigned to heal a screen bot (see `_recompute_assignments`) land in
-    that same column too. Small fleets collapse to one spread line -- there
-    aren't enough bots to make a screen-plus-column split meaningful."""
+    that same column too. The screen width is `ceil(sqrt(n))`, so the
+    resulting grid comes out roughly square -- as many columns as rows --
+    rather than one wide row with a deep tail behind it. Small fleets
+    collapse to one spread line -- there aren't enough bots to make a
+    screen-plus-column split meaningful."""
     n = len(battles)
     if n == 0:
         return {}
@@ -238,7 +242,12 @@ def _compute_battle_formation(
         raw_slots.update(s)
         anchors.update(a)
     else:
-        n_screen = max(1, n // 2)
+        # ceil(sqrt(n)) columns means ceil(n / that) rows too -- a square
+        # grid (or as close to one as an integer bot count allows), instead
+        # of the lopsided "half the fleet in one wide screen row, the other
+        # half stacked deep behind it" split a fixed 50/50 would give a
+        # large fleet.
+        n_screen = max(1, math.ceil(math.sqrt(n)))
         screen_center = payload + forward * max(2.0 * conf.bot.radius, conf.bot.blaster_range * 0.25)
 
         screen = battles[:n_screen]
